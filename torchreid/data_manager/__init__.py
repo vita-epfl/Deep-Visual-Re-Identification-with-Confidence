@@ -21,8 +21,8 @@ from .dukemtmcvidreid import DukeMTMCVidReID
 from .cars196 import Cars196
 from .stanford_products import StanforOnlineProducts
 from .cub200_2011 import CUB200_2011
-#from .VeRi import VeRi
-#from .Wild import Wild
+from .VeRi import VeRi
+from .Wild import Wild
 
 __imgreid_factory = {
     'market1501': Market1501,
@@ -37,7 +37,9 @@ __imgreid_factory = {
     'sensereid': SenseReID,
     'cars196': Cars196,
     'stanfordproducts': StanforOnlineProducts,
-    'cub200': CUB200_2011
+    'cub200': CUB200_2011,
+    'veri776': VeRi,
+    'veriwild': Wild
 }
 
 
