@@ -23,6 +23,8 @@ from .stanford_products import StanforOnlineProducts
 from .cub200_2011 import CUB200_2011
 from .VeRi import VeRi
 from .Wild import Wild
+from .epflroundabout import EPFLRoundabout
+from .nuscenes import NuScenes
 
 __imgreid_factory = {
     'market1501': Market1501,
@@ -39,7 +41,9 @@ __imgreid_factory = {
     'stanfordproducts': StanforOnlineProducts,
     'cub200': CUB200_2011,
     'veri776': VeRi,
-    'veriwild': Wild
+    'veriwild': Wild,
+    'epflroundabout': EPFLRoundabout,
+    'nuscenes': NuScenes,
 }
 
 

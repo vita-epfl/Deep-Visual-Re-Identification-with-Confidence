@@ -8,7 +8,10 @@ from .angular_softmax import AngleLoss
 
 from .entropy_loss import ConfidencePenalty
 from .customTripletLoss import TripletLoss_custom,SoftTripletLoss_custom
+from .loss_autotune import MultiHeadLossAutoTune
+from .info_loss import InfoLoss
 from .jsd import JSD_loss
+from .focal_loss import FocalLoss
 
 
 def DeepSupervision(criterion, xs, y):

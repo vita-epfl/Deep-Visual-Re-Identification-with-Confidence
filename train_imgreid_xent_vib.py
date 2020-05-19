@@ -19,7 +19,7 @@ from torchreid import data_manager
 from torchreid.dataset_loader_custom import ImageDataset
 from torchreid import transforms as T
 from torchreid import models
-from torchreid.losses import CrossEntropyLabelSmooth, DeepSupervision,AngularLabelSmooth,AngleLoss,ConfidencePenalty,JSD_loss
+from torchreid.losses import CrossEntropyLabelSmooth, DeepSupervision,AngularLabelSmooth,AngleLoss,ConfidencePenalty,JSD_loss, InfoLoss, MultiHeadLossAutoTune
 from torchreid.utils.iotools import save_checkpoint, check_isfile
 from torchreid.utils.avgmeter import AverageMeter
 from torchreid.utils.logger import Logger
@@ -89,8 +89,8 @@ parser.add_argument('--freeze-bn', action='store_true',
 parser.add_argument('--label-smooth', action='store_true',
                     help="use label smoothing regularizer in cross entropy loss")
 
-parser.add_argument('--scheduler', type=int, default=0,
-                    help="weight to balance rotation loss")
+parser.add_argument('--scheduler', action='store_true',
+                    help="Enable learning rate schedular")
 
 parser.add_argument('--test-rot', action='store_true',
                     help="Train only classifier to get rotation")
@@ -111,6 +111,8 @@ parser.add_argument('--load-weights', type=str, default='',
 parser.add_argument('--evaluate', action='store_true',
                     help="evaluation only")
 parser.add_argument('--eval-step', type=int, default=-1,
+                    help="run evaluation for every N epochs (set to -1 to test after training)")
+parser.add_argument('--save-epoch', type=int, default=-1,
                     help="run evaluation for every N epochs (set to -1 to test after training)")
 parser.add_argument('--start-eval', type=int, default=0,
                     help="start to evaluate after specific epoch")
@@ -147,6 +149,8 @@ parser.add_argument('--confidence-beta',type=float, default=1,
                     help="set confidence penalty beta ")
 parser.add_argument('--jsd', action='store_true',
                     help="use JSD in cross entropy loss")
+parser.add_argument('--auto-tune-mtl', action='store_true',
+                    help="Use Loss AutoTune")
 
 parser.add_argument("--re-ranking", action='store_true',
                     help="Use k-reciprocal re-ranking (default: False)")
@@ -155,6 +159,8 @@ parser.add_argument("--use-ecn", action='store_true',
 
 parser.add_argument("--use-cosine", action='store_true',
                     help="Use cosine distance to rank (default: False)")
+parser.add_argument('-sw', '--split-wild', type=str, default='large',
+                    choices=["small", "medium", "large"])
 
 def main(args):
     args = parser.parse_args(args)
@@ -183,25 +189,20 @@ def main(args):
         print("Currently using GPU {}".format(args.gpu_devices))
         cudnn.benchmark = True
         torch.cuda.manual_seed_all(args.seed)
-        # print("Currently using GPU {}".format(args.gpu_devices))
-        # #cudnn.benchmark = False
-        # cudnn.deterministic = True
-        # torch.cuda.manual_seed_all(args.seed)
-        # torch.set_default_tensor_type('torch.DoubleTensor')
     else:
         print("Currently using CPU (GPU is highly recommended)")
 
     print("Initializing dataset {}".format(args.dataset))
     dataset = data_manager.init_imgreid_dataset(
         root=args.root, name=args.dataset, split_id=args.split_id,
-        cuhk03_labeled=args.cuhk03_labeled, cuhk03_classic_split=args.cuhk03_classic_split,
+        cuhk03_labeled=args.cuhk03_labeled, cuhk03_classic_split=args.cuhk03_classic_split, split_wild=args.split_wild
     )
 
     transform_train = T.Compose([
         T.Random2DTranslation(args.height, args.width),
         #T.Resize((args.height, args.width)),
         T.RandomSizedEarser(),
-        T.RandomHorizontalFlip_rot(),
+        T.RandomHorizontalFlip_custom(),
         #T.Resize((args.height, args.width)),
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -215,71 +216,72 @@ def main(args):
 
     pin_memory = True if use_gpu else False
 
-    if not (args.dataset == 'market1501' or args.dataset == 'msmt17' or args.dataset == 'dukemtmcreid' or args.dataset == 'cuhk03'):
-        trainloader = DataLoader(
-            ImageDataset(dataset.train,dataset.root_angle, transform=transform_train),
-            batch_size=args.train_batch, shuffle=True, num_workers=args.workers,
-            pin_memory=pin_memory, drop_last=True,
-        )
+    trainloader = DataLoader(
+        ImageDataset(dataset.train, transform=transform_train),
+        batch_size=args.train_batch, shuffle=True, num_workers=args.workers,
+        pin_memory=pin_memory, drop_last=True,
+    )
 
-        queryloader = DataLoader(
-            ImageDataset(dataset.query,dataset.root_angle, transform=transform_test),
-            batch_size=args.test_batch, shuffle=False, num_workers=args.workers,
-            pin_memory=pin_memory, drop_last=False,
-        )
+    queryloader = DataLoader(
+        ImageDataset(dataset.query, transform=transform_test, return_path=args.draw_tsne),
+        batch_size=args.test_batch, shuffle=False, num_workers=args.workers,
+        pin_memory=pin_memory, drop_last=False,
+    )
 
-        galleryloader = DataLoader(
-            ImageDataset(dataset.gallery,dataset.root_angle, transform=transform_test),
-            batch_size=args.test_batch, shuffle=False, num_workers=args.workers,
-            pin_memory=pin_memory, drop_last=False,
-        )
-    else:
-        trainloader = DataLoader(
-            ImageDataset(dataset.train,-1, transform=transform_train),
-            batch_size=args.train_batch, shuffle=True, num_workers=args.workers,
-            pin_memory=pin_memory, drop_last=True,
-        )
-
-        queryloader = DataLoader(
-            ImageDataset(dataset.query,-1, transform=transform_test),
-            batch_size=args.test_batch, shuffle=False, num_workers=args.workers,
-            pin_memory=pin_memory, drop_last=False,
-        )
-
-        galleryloader = DataLoader(
-            ImageDataset(dataset.gallery,-1, transform=transform_test),
-            batch_size=args.test_batch, shuffle=False, num_workers=args.workers,
-            pin_memory=pin_memory, drop_last=False,
-        )
+    galleryloader = DataLoader(
+        ImageDataset(dataset.gallery, transform=transform_test, return_path=args.draw_tsne),
+        batch_size=args.test_batch, shuffle=False, num_workers=args.workers,
+        pin_memory=pin_memory, drop_last=False,
+    )
 
     print("Initializing model: {}".format(args.arch))
     model = models.init_model(name=args.arch, num_classes=dataset.num_train_pids, loss={'xent','angular'} if args.use_angular else {'xent'}, use_gpu=use_gpu)
     print("Model size: {:.3f} M".format(count_num_param(model)))
-
+    use_autoTune = False
+    info_loss = InfoLoss()
     if not(args.use_angular):
         if args.label_smooth:
             print("Using Label Smoothing")
             criterion = CrossEntropyLabelSmooth(num_classes=dataset.num_train_pids, use_gpu=use_gpu)
         else:
+            print("Using Normal Cross-Entropy")
             criterion = nn.CrossEntropyLoss()
         if args.jsd:
-            criterion = (criterion,JSD_loss(dataset.num_train_pids))
+            print("Using JSD regularizer")
+            criterion = (criterion,JSD_loss(dataset.num_train_pids),info_loss)
         else:
-            print("Using ConfidencePenalty")
-            criterion = (criterion,ConfidencePenalty())
+            if args.confidence_penalty:
+                print("Using Confidence Penalty")
+            criterion = (criterion,ConfidencePenalty(),info_loss)
     else:
         if args.label_smooth:
-            print("Using Label Smoothing")
-            criterion = AngularLabelSmooth(num_classes=dataset.num_train_pids, use_gpu=use_gpu)
+            print("Using Angular Label Smoothing")
+            criterion = (AngularLabelSmooth(num_classes=dataset.num_train_pids, use_gpu=use_gpu),info_loss)
         else:
-            criterion = AngleLoss()
-    optimizer = init_optim(args.optim, model.parameters(), args.lr, args.weight_decay)
-    if args.scheduler != 0:
+            print("Using Label Smoothing")
+            criterion = (AngleLoss(),info_loss)
+    if args.auto_tune_mtl:
+        if args.confidence_penalty:
+            print("Using AutoTune with CP")
+            criterion = MultiHeadLossAutoTune(criterion, [args.lambda_xent, -args.confidence_beta, args.beta]).cuda()
+        elif args.jsd:
+            print("Using AutoTune with JSD")
+            criterion = MultiHeadLossAutoTune(criterion, [args.lambda_xent, args.confidence_beta, args.beta]).cuda()
+        else:
+            print("Using AutoTune without CP or JSD")
+            criterion = MultiHeadLossAutoTune((criterion[0], criterion[-1]), [args.lambda_xent , args.beta]).cuda()
+        optimizer = init_optim(args.optim, list(model.parameters()) + list(criterion.parameters()), args.lr, args.weight_decay)
+    else:
+        optimizer = init_optim(args.optim, model.parameters(), args.lr, args.weight_decay)
+    if args.scheduler:
         scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=args.stepsize, gamma=args.gamma)
 
     if args.fixbase_epoch > 0:
         if hasattr(model, 'classifier') and isinstance(model.classifier, nn.Module):
-            optimizer_tmp = init_optim(args.optim, list(model.classifier.parameters())+list(model.encoder.parameters()), args.fixbase_lr, args.weight_decay)
+            if args.auto_tune_mtl:
+                optimizer_tmp = init_optim(args.optim, list(model.classifier.parameters())+list(model.encoder.parameters())+ list(criterion.parameters()), args.fixbase_lr, args.weight_decay)
+            else:
+                optimizer_tmp = init_optim(args.optim, list(model.classifier.parameters())+list(model.encoder.parameters()), args.fixbase_lr, args.weight_decay)
         else:
             print("Warn: model has no attribute 'classifier' and fixbase_epoch is reset to 0")
             args.fixbase_epoch = 0
@@ -332,75 +334,6 @@ def main(args):
     best_epoch = args.start_epoch
     print("==> Start training")
 
-    if args.test_rot:
-        print("Training only classifier for rotation")
-        model = models.init_model(name='rot_tester',base_model=model,inplanes=2048,num_rot_classes = 8)
-        criterion_rot = nn.CrossEntropyLoss()
-        optimizer_rot = init_optim(args.optim, model.fc_rot.parameters(), args.fixbase_lr, args.weight_decay)
-        if use_gpu:
-            model = nn.DataParallel(model).cuda()
-        try:
-            best_epoch = 0
-            for epoch in range(0, args.max_epoch):
-                start_train_time = time.time()
-                train_rotTester(epoch, model, criterion_rot, optimizer_rot, trainloader, use_gpu, writer,args)
-                train_time += round(time.time() - start_train_time)
-
-                if args.scheduler != 0:
-                    scheduler.step()
-
-                if (epoch + 1) > args.start_eval and args.eval_step > 0 and (epoch + 1) % args.eval_step == 0 or (epoch + 1) == args.max_epoch:
-                    if (epoch + 1) == args.max_epoch:
-                        if use_gpu:
-                            state_dict = model.module.state_dict()
-                        else:
-                            state_dict = model.state_dict()
-
-                        save_checkpoint({
-                            'state_dict': state_dict,
-                            'rank1': -1,
-                            'epoch': epoch,
-                        }, False, osp.join(args.save_dir, 'beforeTesting_checkpoint_ep' + str(epoch + 1) + '.pth.tar'))
-                    print("==> Test")
-                    rank1 = test_rotTester(model,criterion_rot,queryloader, galleryloader, trainloader, use_gpu,args,writer=writer,epoch=epoch)
-                    is_best = rank1 > best_rank1
-
-                    if is_best:
-                        best_rank1 = rank1
-                        best_epoch = epoch + 1
-
-                    if use_gpu:
-                        state_dict = model.module.state_dict()
-                    else:
-                        state_dict = model.state_dict()
-
-                    save_checkpoint({
-                        'state_dict': state_dict,
-                        'rank1': rank1,
-                        'epoch': epoch,
-                    }, is_best, osp.join(args.save_dir, 'checkpoint_ep' + str(epoch + 1) + '.pth.tar'))
-
-            print("==> Best Cccuracy {:.1%}, achieved at epoch {}".format(best_rank1, best_epoch))
-
-            elapsed = round(time.time() - start_time)
-            elapsed = str(datetime.timedelta(seconds=elapsed))
-            train_time = str(datetime.timedelta(seconds=train_time))
-            print("Finished. Total elapsed time (h:m:s): {}. Training time (h:m:s): {}.".format(elapsed, train_time))
-            return best_rank1, best_epoch
-        except KeyboardInterrupt:
-            if use_gpu:
-                state_dict = model.module.state_dict()
-            else:
-                state_dict = model.state_dict()
-
-            save_checkpoint({
-                'state_dict': state_dict,
-                'rank1': -1,
-                'epoch': epoch,
-            }, False, osp.join(args.save_dir, 'keyboardInterrupt_checkpoint_ep' + str(epoch + 1) + '.pth.tar'))
-
-        return None, None
-
     if args.fixbase_epoch > 0:
         print("Train classifier for {} epochs while keeping base network frozen".format(args.fixbase_epoch))
 
@@ -421,7 +354,7 @@ def main(args):
             scheduler.step()
 
 
-        if (epoch + 1) > args.start_eval and args.eval_step > 0 and (epoch + 1) % args.eval_step == 0 or (epoch + 1) == args.max_epoch:
+        if (epoch + 1) > args.start_eval and ((args.save_epoch > 0 and (epoch + 1) % args.save_epoch == 0) or (args.eval_step > 0 and (epoch + 1) % args.eval_step == 0) or (epoch + 1) == args.max_epoch):
             if (epoch + 1) == args.max_epoch:
                 if use_gpu:
                     state_dict = model.module.state_dict()
@@ -433,15 +366,18 @@ def main(args):
                     'rank1': -1,
                     'epoch': epoch,
                 }, False, osp.join(args.save_dir, 'beforeTesting_checkpoint_ep' + str(epoch + 1) + '.pth.tar'))
-            print("==> Test")
+            is_best = False
+            rank1 = -1
+            if args.eval_step > 0:
+                print("==> Test")
 
-            rank1 = test(model, queryloader, galleryloader, use_gpu, args,writer=writer,epoch=epoch)
+                rank1 = test(model, queryloader, galleryloader, use_gpu, args,writer=writer,epoch=epoch)
 
-            is_best = rank1 > best_rank1
+                is_best = rank1 > best_rank1
 
-            if is_best:
-                best_rank1 = rank1
-                best_epoch = epoch + 1
+                if is_best:
+                    best_rank1 = rank1
+                    best_epoch = epoch + 1
 
             if use_gpu:
                 state_dict = model.module.state_dict()
@@ -461,60 +397,6 @@ def main(args):
     train_time = str(datetime.timedelta(seconds=train_time))
     print("Finished. Total elapsed time (h:m:s): {}. Training time (h:m:s): {}.".format(elapsed, train_time))
     return best_rank1, best_epoch
-
-def train_rotTester(epoch, model, criterion_rot,optimizer,trainloader,use_gpu, writer,args,freeze_bn=True):
-
-    #pdb.set_trace()
-    losses = AverageMeter()
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    rot_loss_meter = AverageMeter()
-    printed = False
-    model.train()
-    if freeze_bn or args.freeze_bn:
-        model.apply(set_bn_to_eval)
-        #model.base_model.eval()
-    end = time.time()
-    for batch_idx, (imgs, pids, rotation_labels) in enumerate(trainloader):
-        data_time.update(time.time() - end)
-        if use_gpu:
-            imgs, pids,rotation_labels = imgs.cuda(), pids.cuda(), rotation_labels.cuda()
-
-        rotation_logits = model(imgs)
-        rot_loss = criterion_rot(rotation_logits, rotation_labels)
-
-        loss = rot_loss
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        batch_time.update(time.time() - end)
-
-        losses.update(loss.item(), pids.size(0))
-
-        rot_loss_meter.update(rot_loss.item(), pids.size(0))
-
-        if (batch_idx + 1) % args.print_freq == 0:
-            if not printed:
-              printed = True
-            else:
-              # Clean the current line
-              sys.stdout.console.write("\033[F\033[K")
-              #sys.stdout.console.write("\033[K")
-            print('Epoch: [{0}][{1}/{2}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                  'Data {data_time.val:.4f} ({data_time.avg:.4f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Rot Loss {rot_loss.val:.4f} ({rot_loss.avg:.4f})\t'.format(
-                   epoch + 1, batch_idx + 1, len(trainloader), batch_time=batch_time,
-                   data_time=data_time, loss=losses, rot_loss=rot_loss_meter))
-
-        end = time.time()
-    writer.add_scalars(
-      'loss',
-      dict(angle_loss = rot_loss_meter.avg,
-           loss=losses.avg),
-      epoch + 1)
 
 def train(epoch, model, criterion, optimizer, trainloader, use_gpu,writer, args,freeze_bn=False):
     losses = AverageMeter()
@@ -537,20 +419,38 @@ def train(epoch, model, criterion, optimizer, trainloader, use_gpu,writer, args,
             imgs, pids = imgs.cuda(), pids.cuda()
 
         (mu, std),outputs = model(imgs)
-        if isinstance(outputs, tuple):
-            xent_loss = DeepSupervision(criterion[0], outputs, pids)
-            confidence_loss = DeepSupervision(criterion[1],outputs,pids)
-        else:
-            xent_loss = criterion[0](outputs, pids)
-            confidence_loss = criterion[1](outputs,pids)
+        text_dict = {}
+        if not isinstance(criterion, MultiHeadLossAutoTune):
+            if isinstance(outputs, tuple):
+                xent_loss = DeepSupervision(criterion[0], outputs, pids)
+                confidence_loss = DeepSupervision(criterion[1],outputs,pids)
+            else:
+                xent_loss = criterion[0](outputs, pids)
+                confidence_loss = criterion[1](outputs,pids)
 
-        info_loss = -0.5*(1+2*std.log()-mu.pow(2)-std.pow(2)).sum(1).mean().div(math.log(2))
-        if args.confidence_penalty:
-            loss = args.lambda_xent *xent_loss + args.beta*info_loss - args.confidence_beta *confidence_loss
-        elif args.jsd:
-            loss = args.lambda_xent *xent_loss + args.beta*info_loss + args.confidence_beta *confidence_loss
+            info_loss = criterion[-1](mu.float(), std.float())
+
+            if args.confidence_penalty:
+                loss = args.lambda_xent *xent_loss + args.beta*info_loss - args.confidence_beta *confidence_loss
+            elif args.jsd:
+                loss = args.lambda_xent *xent_loss + args.beta*info_loss + args.confidence_beta *confidence_loss
+            else:
+                loss = args.lambda_xent *xent_loss + args.beta*info_loss
+            confidence_losses.update(confidence_loss.item(), pids.size(0))
         else:
-            loss = args.lambda_xent *xent_loss + args.beta*info_loss
+
+            if args.confidence_penalty or args.jsd:
+                loss, individual_losses = criterion([outputs,outputs, mu], [pids, pids, std])
+                confidence_loss = individual_losses[1]
+            else:
+                loss, individual_losses = criterion([outputs, mu], [pids, std])
+                confidence_loss = 0
+            xent_loss = individual_losses[0]
+            info_loss = individual_losses[-1]
+            text_dict = criterion.batch_meta()
+            confidence_losses.update(0, pids.size(0))
+        #info_loss = -0.5*(1-2*std.log()-(1+mu.pow(2))/(2*std.pow(2))).sum(1).mean().div(math.log(2))
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -558,7 +458,7 @@ def train(epoch, model, criterion, optimizer, trainloader, use_gpu,writer, args,
         batch_time.update(time.time() - end)
 
         losses.update(loss.item(), pids.size(0))
-        confidence_losses.update(confidence_loss.item(), pids.size(0))
+
         xent_losses.update(xent_loss.item(), pids.size(0))
         info_losses.update(info_loss.item(), pids.size(0))
         if (batch_idx + 1) % args.print_freq == 0:
@@ -577,7 +477,7 @@ def train(epoch, model, criterion, optimizer, trainloader, use_gpu,writer, args,
                       'Info_Loss {info_loss.val:.4f} ({info_loss.avg:.4f})\t'
                       'Total_Loss {loss.val:.4f} ({loss.avg:.4f})\t'.format(
                        epoch + 1, batch_idx + 1, len(trainloader), batch_time=batch_time,
-                       data_time=data_time,xent_loss=xent_losses,confidence_loss=confidence_losses, loss=losses))
+                       data_time=data_time,xent_loss=xent_losses,confidence_loss=confidence_losses, loss=losses), text_dict)
             else:
                 print('Epoch: [{0}][{1}/{2}]\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
@@ -587,7 +487,7 @@ def train(epoch, model, criterion, optimizer, trainloader, use_gpu,writer, args,
                       'Info_Loss {info_loss.val:.4f} ({info_loss.avg:.4f})\t'
                       'Total_Loss {loss.val:.4f} ({loss.avg:.4f})\t'.format(
                        epoch + 1, batch_idx + 1, len(trainloader), batch_time=batch_time,
-                       data_time=data_time,xent_loss=xent_losses,confidence_loss=confidence_losses,info_loss=info_losses, loss=losses))
+                       data_time=data_time,xent_loss=xent_losses,confidence_loss=confidence_losses,info_loss=info_losses, loss=losses), text_dict)
 
         end = time.time()
 
@@ -598,74 +498,6 @@ def train(epoch, model, criterion, optimizer, trainloader, use_gpu,writer, args,
             info_loss=info_losses.avg,
             confidence_loss = confidence_losses.avg),
       epoch + 1)
-
-def test_rotTester(model,criterion_rot,queryloader, galleryloader, trainloader, use_gpu,args,writer,epoch, ranks=[1, 5, 10, 20], return_distmat=False):
-    batch_time = AverageMeter()
-    top1_test = AverageMeter()
-    top1_train = AverageMeter()
-    rot_loss_meter = AverageMeter()
-    training_rot_loss_meter = AverageMeter()
-
-    model.eval()
-
-    with torch.no_grad():
-
-        for batch_idx, (imgs, pids, rotation_labels) in enumerate(queryloader):
-            if use_gpu: imgs,rotation_labels = imgs.cuda(),rotation_labels.cuda()
-
-            end = time.time()
-            rot_logits = model(imgs)
-            batch_time.update(time.time() - end)
-            rot_loss = criterion_rot(rot_logits, rotation_labels)
-            prec1 = accuracy(rot_logits.data, rotation_labels.data)
-            top1_test.update(prec1[0])
-            rot_loss_meter.update(rot_loss.item(), pids.size(0))
-        end = time.time()
-
-        print("--------Done Query-----")
-        for batch_idx, (imgs, pids, rotation_labels) in enumerate(galleryloader):
-            if use_gpu: imgs,rotation_labels = imgs.cuda(),rotation_labels.cuda()
-
-            end = time.time()
-            rot_logits = model(imgs)
-            batch_time.update(time.time() - end)
-
-            prec1 = accuracy(rot_logits.data, rotation_labels.data)
-            top1_test.update(prec1[0])
-            rot_loss_meter.update(rot_loss.item(), pids.size(0))
-
-        print("--------Done Gallery-----")
-        for batch_idx, (imgs, pids, rotation_labels) in enumerate(trainloader):
-            if use_gpu: imgs,rotation_labels = imgs.cuda(),rotation_labels.cuda()
-
-            end = time.time()
-            rot_logits = model(imgs)
-            batch_time.update(time.time() - end)
-
-            prec1 = accuracy(rot_logits.data, rotation_labels.data)
-            top1_train.update(prec1[0])
-            training_rot_loss_meter.update(rot_loss.item(), pids.size(0))
-
-        print("--------Done Training-----")
-    print("==> BatchTime(s)/BatchSize(img): {:.3f}/{}".format(batch_time.avg, args.test_batch))
-
-    print("Test Angle Acc:{:.2f}".format(top1_test.avg.cpu().numpy()[0]))
-    print("Train Angle Acc:{:.2f}".format(top1_train.avg.cpu().numpy()[0]))
-    print("------------------")
-
-    if writer != None:
-        writer.add_scalars(
-          'Accuracy Graph',
-          dict(test_accuracy=top1_test.avg.cpu().numpy()[0],
-               train_accuracy = top1_train.avg.cpu().numpy()[0]),
-          epoch + 1)
-
-        writer.add_scalars(
-        'Loss Graph',
-        dict(test_loss=rot_loss_meter.avg,
-             train_loss = training_rot_loss_meter.avg),
-        epoch + 1)
-    return top1_test.avg.cpu().numpy()[0]
 
 def test(model, queryloader, galleryloader, use_gpu, args,writer,epoch, ranks=[1, 5, 10, 20], return_distmat=False,use_cosine = False,draw_tsne=False,tsne_clusters=3):
 
@@ -862,8 +694,6 @@ def test_vib(model, queryloader, galleryloader, use_gpu, args,writer,epoch, rank
         print("Extracted features for gallery set, obtained {}-by-{} matrix".format(gf.size(0), gf.size(1)))
 
     print("==> BatchTime(s)/BatchSize(img): {:.3f}/{}".format(batch_time.avg, args.test_batch))
-
-    pdb.set_trace()
 
     m, n = qf_stat.size(0), gf_stat.size(0)
     score_board = torch.zeros((m,n,n),dtype=torch.int16)

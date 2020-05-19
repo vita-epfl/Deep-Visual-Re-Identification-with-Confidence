@@ -18,7 +18,7 @@ class VeRi(BaseImageDataset):
     VeRi
 
     """
-    dataset_dir = 'vehicle/veri-776'
+    dataset_dir = 'vehicle/veri-776/VeRi_with_plate/'
 
     def __init__(self, root='/data/linah-data/', verbose=True, **kwargs):
         super(VeRi, self).__init__()
