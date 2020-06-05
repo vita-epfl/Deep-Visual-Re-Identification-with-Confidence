@@ -1,4 +1,4 @@
-# Rethinking Person Re-Identification with Confidence
+# Deep Visual Re-Identification with Confidence
 
 ## Get started
 1. `cd` to the folder where you want to download this repo.
