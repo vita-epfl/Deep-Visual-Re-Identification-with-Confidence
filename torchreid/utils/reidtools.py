@@ -202,7 +202,7 @@ def visualize_ranked_results(distmat, dataset, save_dir='log/ranked_results', to
         qdir = osp.join(save_dir, os.path.splitext(osp.basename(qimg_path))[0])
         qdir_incorrect = osp.join(save_dir,'incorrect', os.path.splitext(osp.basename(qimg_path))[0])
         mkdir_if_missing(qdir)
-        _cp_img_to(qimg_path, qdir, rank=0, prefix=prefix)
+        _cp_img_to(qimg_path, qdir, rank=0, prefix='0_query_id'+str(qpid)+'_camid'+str(qcamid))
         incorrect = False
         rank_idx = 1
         for g_idx in indices[q_idx,:]:
@@ -215,10 +215,11 @@ def visualize_ranked_results(distmat, dataset, save_dir='log/ranked_results', to
                 if rank_idx == 1 and qpid != gpid:
                     incorrect = True
                     mkdir_if_missing(qdir_incorrect)
-                    _cp_img_to(qimg_path, qdir_incorrect, rank=0, prefix='0_query')
-                _cp_img_to(gimg_path, qdir, rank=rank_idx, prefix=prefix)
+                    _cp_img_to(qimg_path, qdir_incorrect, rank=0, prefix='0_query_id'+str(qpid)+'_camid'+str(qcamid))
                 if incorrect:
-                    _cp_img_to(gimg_path, qdir_incorrect, rank=rank_idx, prefix=str(rank_idx)+'_' + prefix)
+                    _cp_img_to(gimg_path, qdir_incorrect, rank=rank_idx, prefix=str(rank_idx)+'_' + prefix+'_id'+str(gpid)+'_camid'+str(gcamid))
+                else:
+                    _cp_img_to(gimg_path, qdir, rank=rank_idx, prefix=str(rank_idx)+'_' + prefix+'_id'+str(gpid)+'_camid'+str(gcamid))
                 rank_idx += 1
                 if rank_idx > topk:
                     break

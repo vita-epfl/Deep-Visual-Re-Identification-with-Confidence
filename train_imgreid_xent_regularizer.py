@@ -19,7 +19,7 @@ from torchreid import data_manager
 from torchreid.dataset_loader_custom import ImageDataset
 from torchreid import transforms as T
 from torchreid import models
-from torchreid.losses import CrossEntropyLabelSmooth, DeepSupervision, AngularLabelSmooth, AngleLoss, ConfidencePenalty, JSD_loss
+from torchreid.losses import CrossEntropyLabelSmooth, DeepSupervision, AngularLabelSmooth, AngleLoss, ConfidencePenalty, JSD_loss, MultiHeadLossAutoTune, FocalLoss
 from torchreid.utils.iotools import save_checkpoint, check_isfile
 from torchreid.utils.avgmeter import AverageMeter
 from torchreid.utils.logger import Logger
@@ -106,6 +106,9 @@ parser.add_argument('--evaluate', action='store_true',
                     help="evaluation only")
 parser.add_argument('--eval-step', type=int, default=-1,
                     help="run evaluation for every N epochs (set to -1 to test after training)")
+
+parser.add_argument('--save-epoch', type=int, default=-1,
+    help="run evaluation for every N epochs (set to -1 to test after training)")
 parser.add_argument('--start-eval', type=int, default=0,
                     help="start to evaluate after specific epoch")
 parser.add_argument('--save-dir', type=str, default='log')
@@ -129,13 +132,21 @@ parser.add_argument('--tsne-labels',type=int, default=3,
                     help="Number of TSNE Clusters (Default: 3)")
 parser.add_argument('--confidence-penalty', action='store_true',
                     help="use confidence penalty regularizer in cross entropy loss")
-parser.add_argument('--confidence-beta',type=float, default=1,
+parser.add_argument('--focal-loss', action='store_true',
+                    help="use Focal Loss")
+parser.add_argument('--confidence-beta',type=float, default=0,
                     help="set confidence penalty beta ")
+parser.add_argument('--focal-gamma',type=float, default=1,
+                    help="set gamma of Focal loss")
+parser.add_argument('--label-epsilon',type=float, default=0.1,
+                    help="set label smoothing epsilon ")
 parser.add_argument('--jsd', action='store_true',
                     help="use JSD in addition cross entropy loss")
 
 parser.add_argument('--single-folder', default='', type=str,
                     help='specific folder to extract features')
+parser.add_argument('--auto-tune-mtl', action='store_true',
+                    help="Use Loss AutoTune")
 
 # Re-Ranking arguments
 parser.add_argument("--re-ranking", action='store_true',
@@ -145,6 +156,8 @@ parser.add_argument("--use-ecn", action='store_true',
 
 parser.add_argument("--use-cosine", action='store_true',
                     help="Use cosine distance to rank (default: False)")
+parser.add_argument('-sw', '--split-wild', type=str, default='large',
+                    choices=["small", "medium", "large"])
 def main(args):
     args = parser.parse_args(args)
     #global best_rank1
@@ -178,7 +191,7 @@ def main(args):
     print("Initializing dataset {}".format(args.dataset))
     dataset = data_manager.init_imgreid_dataset(
         root=args.root, name=args.dataset, split_id=args.split_id,
-        cuhk03_labeled=args.cuhk03_labeled, cuhk03_classic_split=args.cuhk03_classic_split,
+        cuhk03_labeled=args.cuhk03_labeled, cuhk03_classic_split=args.cuhk03_classic_split, split_wild=args.split_wild
     )
 
     transform_train = T.Compose([
@@ -220,10 +233,14 @@ def main(args):
     model = models.init_model(name=args.arch, num_classes=dataset.num_train_pids, loss={'xent','angular'} if args.use_angular else {'xent'}, use_gpu=use_gpu)
     print("Model size: {:.3f} M".format(count_num_param(model)))
 
+    use_autoTune = False
     if not(args.use_angular):
         if args.label_smooth:
-            print("Using Label Smoothing")
-            criterion = CrossEntropyLabelSmooth(num_classes=dataset.num_train_pids, use_gpu=use_gpu)
+            print("Using Label Smoothing with epsilon", args.label_epsilon)
+            criterion = CrossEntropyLabelSmooth(num_classes=dataset.num_train_pids, epsilon=args.label_epsilon, use_gpu=use_gpu)
+        elif args.focal_loss:
+            print("Using Focal Loss with gamma=", args.focal_gamma)
+            criterion = FocalLoss(gamma=args.focal_gamma)
         else:
             print("Using Normal Cross-Entropy")
             criterion = nn.CrossEntropyLoss()
@@ -231,10 +248,18 @@ def main(args):
         if args.jsd:
             print("Using JSD regularizer")
             criterion = (criterion,JSD_loss(dataset.num_train_pids))
+            if args.auto_tune_mtl:
+                print("Using AutoTune")
+                use_autoTune = True
+                criterion = MultiHeadLossAutoTune(list(criterion),[args.lambda_xent, args.confidence_beta]).cuda()
         else:
             if args.confidence_penalty:
-                print("Using Confidence Penalty")
+                print("Using Confidence Penalty", args.confidence_beta)
             criterion = (criterion,ConfidencePenalty())
+            if args.auto_tune_mtl and args.confidence_penalty:
+                print("Using AutoTune")
+                use_autoTune = True
+                criterion = MultiHeadLossAutoTune(list(criterion),[args.lambda_xent, -args.confidence_beta]).cuda()
     else:
         if args.label_smooth:
             print("Using Angular Label Smoothing")
@@ -243,13 +268,19 @@ def main(args):
         else:
             print("Using Angular Loss")
             criterion = AngleLoss()
-    optimizer = init_optim(args.optim, model.parameters(), args.lr, args.weight_decay)
+    if use_autoTune:
+        optimizer = init_optim(args.optim, list(model.parameters()) + list(criterion.parameters()), args.lr, args.weight_decay)
+    else:
+        optimizer = init_optim(args.optim, model.parameters(), args.lr, args.weight_decay)
     if args.scheduler:
         scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=args.stepsize, gamma=args.gamma)
 
     if args.fixbase_epoch > 0:
         if hasattr(model, 'classifier') and isinstance(model.classifier, nn.Module):
-            optimizer_tmp = init_optim(args.optim, model.classifier.parameters(), args.fixbase_lr, args.weight_decay)
+            if use_autoTune:
+                optimizer_tmp = init_optim(args.optim, list(model.classifier.parameters())+list(criterion.parameters()), args.fixbase_lr, args.weight_decay)
+            else:
+                optimizer_tmp = init_optim(args.optim, model.classifier.parameters(), args.fixbase_lr, args.weight_decay)
         else:
             print("Warn: model has no attribute 'classifier' and fixbase_epoch is reset to 0")
             args.fixbase_epoch = 0
@@ -286,7 +317,7 @@ def main(args):
                 test_dir = os.path.dirname(args.resume)
             else:
                 test_dir = os.path.dirname(args.load_weights)
-        distmat = test(model, queryloader, galleryloader, use_gpu, args,writer=None,epoch=-1, return_distmat=True,draw_tsne=args.draw_tsne,tsne_clusters=args.tsne_labels)
+        distmat = test(model, queryloader, galleryloader, use_gpu, args,writer=None,epoch=-1, return_distmat=True,tsne_clusters=args.tsne_labels)
 
         if args.visualize_ranks:
             visualize_ranked_results(
@@ -323,7 +354,7 @@ def main(args):
             scheduler.step()
 
 
-        if (epoch + 1) > args.start_eval and args.eval_step > 0 and (epoch + 1) % args.eval_step == 0 or (epoch + 1) == args.max_epoch:
+        if (epoch + 1) > args.start_eval and ((args.save_epoch > 0 and (epoch + 1) % args.save_epoch == 0) or (args.eval_step > 0 and (epoch + 1) % args.eval_step == 0) or (epoch + 1) == args.max_epoch):
             if (epoch + 1) == args.max_epoch:
                 if use_gpu:
                     state_dict = model.module.state_dict()
@@ -335,15 +366,18 @@ def main(args):
                     'rank1': -1,
                     'epoch': epoch,
                 }, False, osp.join(args.save_dir, 'beforeTesting_checkpoint_ep' + str(epoch + 1) + '.pth.tar'))
-            print("==> Test")
+            is_best = False
+            rank1 = -1
+            if args.eval_step > 0:
+                print("==> Test")
 
-            rank1 = test(model, queryloader, galleryloader, use_gpu, args,writer=writer,epoch=epoch)
+                rank1 = test(model, queryloader, galleryloader, use_gpu, args,writer=writer,epoch=epoch)
 
-            is_best = rank1 > best_rank1
+                is_best = rank1 > best_rank1
 
-            if is_best:
-                best_rank1 = rank1
-                best_epoch = epoch + 1
+                if is_best:
+                    best_rank1 = rank1
+                    best_epoch = epoch + 1
 
             if use_gpu:
                 state_dict = model.module.state_dict()
@@ -384,19 +418,28 @@ def train(epoch, model, criterion, optimizer, trainloader, use_gpu,writer, args,
             imgs, pids = imgs.cuda(), pids.cuda()
 
         outputs = model(imgs)
-        if isinstance(outputs, tuple):
-            xent_loss = DeepSupervision(criterion[0], outputs, pids)
-            confidence_loss = DeepSupervision(criterion[1],outputs,pids)
+        text_dict = {}
+        if not isinstance(criterion, MultiHeadLossAutoTune):
+            if isinstance(outputs, tuple):
+                xent_loss = DeepSupervision(criterion[0], outputs, pids)
+                confidence_loss = DeepSupervision(criterion[1],outputs,pids)
+            else:
+                xent_loss = criterion[0](outputs, pids)
+                confidence_loss = criterion[1](outputs,pids)
+            if args.confidence_penalty:
+                loss = args.lambda_xent *xent_loss - args.confidence_beta *confidence_loss
+            elif args.jsd:
+                loss = args.lambda_xent *xent_loss + args.confidence_beta *confidence_loss
+            else:
+                import pdb; pdb.set_trace()
+                loss = args.lambda_xent *xent_loss
         else:
-            xent_loss = criterion[0](outputs, pids)
-            confidence_loss = criterion[1](outputs,pids)
-        if args.confidence_penalty:
+            loss, individual_losses = criterion([outputs, outputs], [pids, pids])
+            xent_loss = individual_losses[0]
+            confidence_loss = individual_losses[1]
+            text_dict = criterion.batch_meta()
 
-            loss = args.lambda_xent *xent_loss - args.confidence_beta *confidence_loss
-        elif args.jsd:
-            loss = args.lambda_xent *xent_loss + args.confidence_beta *confidence_loss
-        else:
-            loss = args.lambda_xent *xent_loss
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -422,7 +465,7 @@ def train(epoch, model, criterion, optimizer, trainloader, use_gpu,writer, args,
                       'JSD_Loss {confidence_loss.val:.4f} ({confidence_loss.avg:.4f})\t'
                       'Total_Loss {loss.val:.4f} ({loss.avg:.4f})\t'.format(
                        epoch + 1, batch_idx + 1, len(trainloader), batch_time=batch_time,
-                       data_time=data_time,xent_loss=xent_losses,confidence_loss=confidence_losses, loss=losses))
+                       data_time=data_time,xent_loss=xent_losses,confidence_loss=confidence_losses, loss=losses), text_dict)
             else:
                 print('Epoch: [{0}][{1}/{2}]\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
@@ -431,7 +474,7 @@ def train(epoch, model, criterion, optimizer, trainloader, use_gpu,writer, args,
                       'Confi_Loss {confidence_loss.val:.4f} ({confidence_loss.avg:.4f})\t'
                       'Total_Loss {loss.val:.4f} ({loss.avg:.4f})\t'.format(
                        epoch + 1, batch_idx + 1, len(trainloader), batch_time=batch_time,
-                       data_time=data_time,xent_loss=xent_losses,confidence_loss=confidence_losses, loss=losses))
+                       data_time=data_time,xent_loss=xent_losses,confidence_loss=confidence_losses, loss=losses), text_dict)
 
         end = time.time()
 

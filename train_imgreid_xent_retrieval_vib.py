@@ -89,8 +89,8 @@ parser.add_argument('--freeze-bn', action='store_true',
 parser.add_argument('--label-smooth', action='store_true',
                     help="use label smoothing regularizer in cross entropy loss")
 
-parser.add_argument('--scheduler', type=int, default=0,
-                    help="weight to balance rotation loss")
+parser.add_argument('--scheduler', action='store_true',
+                    help="Enable learning rate schedular")
 
 parser.add_argument('--test-rot', action='store_true',
                     help="Train only classifier to get rotation")
@@ -195,7 +195,7 @@ def main(args):
     transform_train = T.Compose([
         T.Random2DTranslation(args.height, args.width),
         #T.Resize((args.height, args.width)),
-        #T.RandomSizedEarser(),
+        T.RandomSizedEarser(),
         T.RandomHorizontalFlip(),
         #T.Resize((args.height, args.width)),
         T.ToTensor(),
@@ -219,13 +219,13 @@ def main(args):
     else:
         print("NOT using cropped Images")
     trainloader = DataLoader(
-        datasetLoader(dataset.train,-1, crop = args.crop_img,transform=transform_train),
+        datasetLoader(dataset.train, crop = args.crop_img,transform=transform_train),
         batch_size=args.train_batch, shuffle=True, num_workers=args.workers,
         pin_memory=pin_memory, drop_last=True,
     )
 
     testloader = DataLoader(
-        datasetLoader(dataset.test,-1, crop = args.crop_img,transform=transform_test),
+        datasetLoader(dataset.test, crop = args.crop_img,transform=transform_test),
         batch_size=args.test_batch, shuffle=False, num_workers=args.workers,
         pin_memory=pin_memory, drop_last=False,
     )
