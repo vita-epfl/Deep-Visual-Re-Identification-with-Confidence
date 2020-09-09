@@ -350,9 +350,8 @@ def main(args):
         train(epoch, model, criterion, optimizer, trainloader, use_gpu,writer, args)
         train_time += round(time.time() - start_train_time)
 
-        if args.scheduler != 0:
+        if args.scheduler:
             scheduler.step()
-
 
         if (epoch + 1) > args.start_eval and ((args.save_epoch > 0 and (epoch + 1) % args.save_epoch == 0) or (args.eval_step > 0 and (epoch + 1) % args.eval_step == 0) or (epoch + 1) == args.max_epoch):
             if (epoch + 1) == args.max_epoch:
@@ -383,6 +382,7 @@ def main(args):
                 state_dict = model.module.state_dict()
             else:
                 state_dict = model.state_dict()
+
 
             save_checkpoint({
                 'state_dict': state_dict,
