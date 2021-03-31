@@ -19,8 +19,10 @@
 > variational information bottleneck. They all show a boost in performance
 > validating our claim. Our contribution is generic to any agent of interest,
 > *i.e.*, vehicles or pedestrians, and outperform highly specialized
-> state-of-the-art methods across 5 datasets. The source code and models are
+> state-of-the-art methods across 6 datasets. The source code and models are
 > shared towards an open science mission.
+
+[Paper](https://authors.elsevier.com/sd/article/S0968-090X(21)00092-9):
 
 # Demo
 
