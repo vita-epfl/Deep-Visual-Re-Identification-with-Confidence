@@ -22,7 +22,7 @@
 > state-of-the-art methods across 6 datasets. The source code and models are
 > shared towards an open science mission.
 
-[Paper](https://authors.elsevier.com/sd/article/S0968-090X(21)00092-9):
+[Paper](https://authors.elsevier.com/sd/article/S0968-090X(21)00092-9)
 
 # Demo
 
