@@ -99,3 +99,22 @@ To evaluate your model that is trained using VIB:
 ```sh
 python train_imgreid_xent_vib.py -a resnet50_vib -d market1501 --height 256 --width 128 --load-weights outputs/resnet50_market1501_amsgrad_e300_b32_lr0.0003_vib/best_model.pth.tar --test-batch 100 --gpu-devices 0 --root Dataset/ --evaluate
 ```
+
+# Citation
+When using our work in your research, we will be happy if you cite us! 
+
+```
+@article{ADAIMI2021103067,
+    title = {Deep visual Re-identification with confidence},
+    journal = {Transportation Research Part C: Emerging Technologies},
+    volume = {126},
+    pages = {103067},
+    year = {2021},
+    issn = {0968-090X},
+    doi = {https://doi.org/10.1016/j.trc.2021.103067},
+    url = {https://www.sciencedirect.com/science/article/pii/S0968090X21000929},
+    author = {George Adaimi and Sven Kreiss and Alexandre Alahi},
+    keywords = {Traffic monitoring, Person re-identification, Vehicle re-identification, Flow monitoring},
+    abstract = {Transportation systems often rely on understanding the flow of vehicles or pedestrian. From traffic monitoring at the city scale, to commuters in train terminals, recent progress in sensing technology make it possible to use cameras to better understand the demand, i.e., better track moving agents (e.g., vehicles and pedestrians). Whether the cameras are mounted on drones, vehicles, or fixed in the built environments, they inevitably remain scatter. We need to develop the technology to re-identify the same agents across images captured from non-overlapping field-of-views, referred to as the visual re-identification task. State-of-the-art methods learn a neural network based representation trained with the cross-entropy loss function. We argue that such loss function is not suited for the visual re-identification task hence propose to model confidence in the representation learning framework. We show the impact of our confidence-based learning framework with three methods: label smoothing, confidence penalty, and deep variational information bottleneck. They all show a boost in performance validating our claim. Our contribution is generic to any agent of interest, i.e., vehicles or pedestrians, and outperform highly specialized state-of-the-art methods across 6 datasets. The source code and models are shared towards an open science mission.}
+}
+```
