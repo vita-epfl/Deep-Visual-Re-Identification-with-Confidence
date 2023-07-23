@@ -1,7 +1,7 @@
 backports.functools-lru-cache==1.6.1
 cycler==0.10.0
 Cython==0.29.15
-future==0.18.2
+future==0.18.3
 h5py==2.10.0
 kiwisolver==1.1.0
 matplotlib==2.2.5
